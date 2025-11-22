@@ -5,7 +5,7 @@ from tkinter import messagebox
 
 class ChatClient:
     def __init__(self):
-        # 第一步：连接窗口
+        # 连接窗口
         self.conn_root = tk.Tk()
         self.conn_root.title("Connect to server")
 
