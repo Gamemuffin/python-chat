@@ -1,11 +1,9 @@
 import socket
 import threading
 import argparse
-from user_manager import register_user, login_user, reset_password_with_code
+from user_manager import register_user, login_user, reset_password_with_code, delete_user_with_code
 
-# Maps connection -> username for authenticated clients
 clients = {}
-# Tracks whether a connection is authenticated
 authenticated = {}
 
 def handle_client(conn, addr):
@@ -18,30 +16,22 @@ def handle_client(conn, addr):
                 break
             msg = data.decode("utf-8", errors="ignore")
 
-            # Command handling
+            if msg == "PING":
+                conn.send(b"PONG")
+                continue
+
             if msg.startswith("REGISTER "):
-                # Format: REGISTER <username> <password>
-                parts = msg.split(" ", 2)
-                if len(parts) != 3:
-                    conn.send(b"Register failed: invalid format. Use: REGISTER <username> <password>")
-                    continue
-                _, username, password = parts
+                _, username, password = msg.split(" ", 2)
                 success, result = register_user(username.strip(), password)
                 if success:
-                    # Format recovery codes in readable lines
                     codes_text = "\n".join(result)
-                    response = f"Registration successful!\nYour 10 recovery codes:\n{codes_text}"
+                    response = f"Registration successful!\nYour recovery codes:\n{codes_text}"
                     conn.send(response.encode("utf-8"))
                 else:
                     conn.send(f"Register failed: {result}".encode("utf-8"))
 
             elif msg.startswith("LOGIN "):
-                # Format: LOGIN <username> <password>
-                parts = msg.split(" ", 2)
-                if len(parts) != 3:
-                    conn.send(b"Login failed: invalid format. Use: LOGIN <username> <password>")
-                    continue
-                _, username, password = parts
+                _, username, password = msg.split(" ", 2)
                 success, result = login_user(username.strip(), password)
                 if success:
                     authenticated[conn] = True
@@ -51,20 +41,22 @@ def handle_client(conn, addr):
                     conn.send(f"Login failed: {result}".encode("utf-8"))
 
             elif msg.startswith("RESET "):
-                # Format: RESET <username> <recovery_code> <new_password>
-                parts = msg.split(" ", 3)
-                if len(parts) != 4:
-                    conn.send(b"Reset failed: invalid format. Use: RESET <username> <recovery_code> <new_password>")
-                    continue
-                _, username, recovery_code, new_password = parts
+                _, username, recovery_code, new_password = msg.split(" ", 3)
                 success, result = reset_password_with_code(username.strip(), recovery_code.strip(), new_password)
                 if success:
                     conn.send(result.encode("utf-8"))
                 else:
                     conn.send(f"Reset failed: {result}".encode("utf-8"))
 
+            elif msg.startswith("DELETE "):
+                _, username, recovery_code = msg.split(" ", 2)
+                success, result = delete_user_with_code(username.strip(), recovery_code.strip())
+                if success:
+                    conn.send(result.encode("utf-8"))
+                else:
+                    conn.send(f"Delete failed: {result}".encode("utf-8"))
+
             else:
-                # Treat as chat message if authenticated
                 if authenticated.get(conn, False):
                     username = clients.get(conn, "Unknown")
                     broadcast(f"{username}: {msg}", conn)
@@ -77,11 +69,10 @@ def handle_client(conn, addr):
 
 def broadcast(msg, sender):
     for client in list(clients.keys()):
-        if client != sender:
-            try:
-                client.send(msg.encode("utf-8"))
-            except:
-                cleanup_connection(client)
+        try:
+            client.send(msg.encode("utf-8"))
+        except:
+            cleanup_connection(client)
 
 def cleanup_connection(conn):
     try:
@@ -101,12 +92,11 @@ def start_server(host, port):
     print(f"[Started] Chat server listening on {host}:{port}")
     while True:
         conn, addr = server.accept()
-        t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-        t.start()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simple chat server")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind IP address (e.g., 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=5000, help="Listening port (e.g., 5000)")
+    parser = argparse.ArgumentParser(description="Chat server")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind IP address")
+    parser.add_argument("--port", type=int, default=5000, help="Listening port")
     args = parser.parse_args()
     start_server(args.host, args.port)

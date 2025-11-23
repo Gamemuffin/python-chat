@@ -5,7 +5,6 @@ import random
 import string
 
 USER_FILE = "users.json"
-# Character set: A-Z, a-z, digits, and special symbols (no spaces)
 CHARSET = string.ascii_letters + string.digits + "!@#$%^&*()-_=+[]{};:,.<>?/"
 
 def load_users():
@@ -55,16 +54,24 @@ def login_user(username, password):
 
 def reset_password_with_code(username, recovery_code, new_password):
     users = load_users()
-    if not username or not recovery_code or not new_password:
-        return False, "Username, recovery code, and new password are required."
     if username not in users:
         return False, "User does not exist."
     codes = users[username].get("recovery_codes", [])
     if recovery_code not in codes:
         return False, "Invalid recovery code."
     users[username]["password"] = hash_password(new_password)
-    # Consume the used recovery code
     codes.remove(recovery_code)
     users[username]["recovery_codes"] = codes
     save_users(users)
     return True, "Password has been reset successfully."
+
+def delete_user_with_code(username, recovery_code):
+    users = load_users()
+    if username not in users:
+        return False, "User does not exist."
+    codes = users[username].get("recovery_codes", [])
+    if recovery_code not in codes:
+        return False, "Invalid recovery code."
+    del users[username]
+    save_users(users)
+    return True, "Account deleted successfully."
