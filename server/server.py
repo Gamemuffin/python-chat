@@ -5,28 +5,31 @@ import json
 from typing import Dict, Tuple
 from user_manager import register_user, login_user, reset_password_with_code, delete_user_with_code
 
-# conn -> {"username": str or None}
+# 保存客户端连接和用户名
 clients_lock = threading.Lock()
 clients: Dict[socket.socket, Dict] = {}
 
 def send_json(conn: socket.socket, obj: dict) -> None:
+    """发送 JSON 行到客户端"""
     try:
         data = (json.dumps(obj) + "\n").encode("utf-8")
         conn.sendall(data)
     except Exception:
-        pass  # if send fails, read loop will handle disconnect
+        pass
 
 def broadcast_chat(sender_conn: socket.socket, username: str, message: str) -> None:
+    """广播聊天消息给其他客户端"""
     with clients_lock:
         for conn in list(clients.keys()):
             if conn is sender_conn:
-                continue  # exclude sender; client shows its own "You:" message
+                continue  # 自己的消息客户端已经显示，不需要再发回
             try:
                 send_json(conn, {"type": "chat", "from": username, "message": message})
             except Exception:
                 cleanup(conn)
 
 def cleanup(conn: socket.socket) -> None:
+    """清理断开的连接"""
     try:
         conn.close()
     except Exception:
@@ -36,12 +39,14 @@ def cleanup(conn: socket.socket) -> None:
             del clients[conn]
 
 def parse_line(line: str) -> dict:
+    """解析一行 JSON"""
     try:
         return json.loads(line)
     except json.JSONDecodeError:
         return {"type": "error", "message": "Invalid JSON"}
 
 def handle_command(conn: socket.socket, cmd: dict) -> None:
+    """处理客户端命令"""
     ctype = cmd.get("type")
 
     if ctype == "ping":
@@ -96,14 +101,14 @@ def handle_command(conn: socket.socket, cmd: dict) -> None:
             send_json(conn, {"type": "error", "message": "Please login first."})
             return
         msg = str(cmd.get("message", "")).strip()
-        if not msg:
-            return
-        broadcast_chat(conn, username, msg)
+        if msg:
+            broadcast_chat(conn, username, msg)
         return
 
     send_json(conn, {"type": "error", "message": "Unknown command"})
 
 def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
+    """处理单个客户端连接"""
     print(f"[Connected] {addr}")
     with clients_lock:
         clients[conn] = {"username": None}
@@ -128,6 +133,7 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
         print(f"[Disconnected] {addr}")
 
 def start_server(host: str, port: int) -> None:
+    """启动服务器"""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))

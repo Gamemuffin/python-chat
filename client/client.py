@@ -7,28 +7,38 @@ import time
 
 class ChatClient:
     def __init__(self):
+        # Connection state
         self.sock = None
         self.connected = False
-        self.username = None
         self.buffer = ""
+        self.username = None
 
-        # Single root and view frames
+        # Tk root and views
         self.root = tk.Tk()
         self.root.title("Chat Client")
         self.connect_frame = None
         self.auth_frame = None
         self.chat_frame = None
 
-        # Widgets shared
+        # Widgets
+        self.host_entry = None
+        self.port_entry = None
+        self.username_entry = None
+        self.password_entry = None
         self.text_area = None
         self.entry = None
 
-        # Build views
+        # Threads control
+        self.reader_thread = None
+        self.ping_thread = None
+        self.stop_threads = threading.Event()
+
+        # Build UI
         self.build_connect_view()
         self.root.protocol("WM_DELETE_WINDOW", self.close_all)
         self.root.mainloop()
 
-    # ---------- Views ----------
+    # ----------------------- UI view helpers -----------------------
     def clear_root(self):
         for child in self.root.winfo_children():
             child.destroy()
@@ -87,38 +97,51 @@ class ChatClient:
         self.entry.bind("<Return>", self.send_message)
         tk.Button(bottom, text="Send", width=10, command=self.send_message).pack(side="right", padx=4)
 
-    # ---------- Connection ----------
+    # ----------------------- Networking -----------------------
     def connect_server(self):
-        host = self.host_entry.get().strip()
-        port_text = self.port_entry.get().strip()
+        host = (self.host_entry.get() if self.host_entry else "").strip()
+        port_str = (self.port_entry.get() if self.port_entry else "").strip()
         try:
-            port = int(port_text)
+            port = int(port_str)
         except ValueError:
             messagebox.showerror("Error", "Port must be a number.")
             return
 
+        self.disconnect_socket()  # ensure clean state
+        self.stop_threads.clear()
+
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((host, port))
+            self.sock.settimeout(None)
             self.connected = True
             messagebox.showinfo("Info", f"Connected to {host}:{port}")
-            self.build_auth_view()
-            threading.Thread(target=self.read_loop, daemon=True).start()
-            threading.Thread(target=self.ping_loop, daemon=True).start()
         except Exception as e:
+            self.connected = False
+            self.sock = None
             messagebox.showerror("Error", f"Connection failed: {e}")
+            return
 
-    # ---------- Networking ----------
+        # Switch to auth view and start threads
+        self.build_auth_view()
+        self.reader_thread = threading.Thread(target=self.read_loop, daemon=True)
+        self.reader_thread.start()
+        self.ping_thread = threading.Thread(target=self.ping_loop, daemon=True)
+        self.ping_thread.start()
+
     def send_json(self, obj: dict):
+        if not self.connected or not self.sock:
+            return
         try:
             data = (json.dumps(obj) + "\n").encode("utf-8")
             self.sock.sendall(data)
         except Exception:
-            self.on_disconnect()
+            # Any send failure triggers disconnect flow
+            self.root.after(0, self.on_disconnect)
 
     def read_loop(self):
         try:
-            while self.connected:
+            while self.connected and not self.stop_threads.is_set():
                 data = self.sock.recv(4096)
                 if not data:
                     break
@@ -127,42 +150,59 @@ class ChatClient:
                     line, self.buffer = self.buffer.split("\n", 1)
                     if not line.strip():
                         continue
+                    # Marshal handling to main thread
                     self.root.after(0, self.handle_server_message, line)
         except Exception:
             pass
+        # Exit path
         self.root.after(0, self.on_disconnect)
 
     def ping_loop(self):
-        while self.connected:
-            try:
-                self.send_json({"type": "ping"})
-            except Exception:
-                break
-            time.sleep(2)
+        while self.connected and not self.stop_threads.is_set():
+            self.send_json({"type": "ping"})
+            for _ in range(20):  # 2s sleep in 0.1s steps to allow responsive stop
+                if not self.connected or self.stop_threads.is_set():
+                    return
+                time.sleep(0.1)
 
-    # ---------- Handlers ----------
+    def disconnect_socket(self):
+        try:
+            if self.sock:
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                self.sock.close()
+        except Exception:
+            pass
+        self.sock = None
+        self.connected = False
+
+    # ----------------------- Server message handling -----------------------
     def handle_server_message(self, line: str):
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
             return
+
         mtype = msg.get("type")
+
+        if mtype == "pong":
+            return
 
         if mtype == "register_ok":
             self.show_codes_window(msg.get("recovery_codes", []))
             return
 
         if mtype == "login_ok":
-            self.username = self.username_entry.get().strip()
+            # Move to chat on successful login
+            self.username = (self.username_entry.get() if self.username_entry else "").strip()
             self.build_chat_view()
             self.append_text("[System] Login successful.")
             return
 
-        if mtype in ("reset_ok", "delete_ok"):
+        if mtype == "reset_ok" or mtype == "delete_ok":
             messagebox.showinfo("Info", msg.get("message", "OK"))
-            return
-
-        if mtype == "pong":
             return
 
         if mtype == "chat":
@@ -175,18 +215,18 @@ class ChatClient:
             messagebox.showerror("Error", msg.get("message", "Unknown error"))
             return
 
-    # ---------- Actions ----------
+    # ----------------------- Actions -----------------------
     def login(self):
-        u = self.username_entry.get().strip()
-        p = self.password_entry.get()
+        u = (self.username_entry.get() if self.username_entry else "").strip()
+        p = (self.password_entry.get() if self.password_entry else "")
         if not u or not p:
             messagebox.showerror("Error", "Username and password are required.")
             return
         self.send_json({"type": "login", "username": u, "password": p})
 
     def register(self):
-        u = self.username_entry.get().strip()
-        p = self.password_entry.get()
+        u = (self.username_entry.get() if self.username_entry else "").strip()
+        p = (self.password_entry.get() if self.password_entry else "")
         if not u or not p:
             messagebox.showerror("Error", "Username and password are required.")
             return
@@ -195,6 +235,7 @@ class ChatClient:
     def reset_password(self):
         win = tk.Toplevel(self.root)
         win.title("Reset password with recovery code")
+        win.grab_set()
 
         tk.Label(win, text="Username").pack(pady=4)
         u_entry = tk.Entry(win); u_entry.pack(pady=4, fill="x")
@@ -220,6 +261,7 @@ class ChatClient:
     def delete_account(self):
         win = tk.Toplevel(self.root)
         win.title("Delete account with recovery code")
+        win.grab_set()
 
         tk.Label(win, text="Username").pack(pady=4)
         u_entry = tk.Entry(win); u_entry.pack(pady=4, fill="x")
@@ -245,10 +287,11 @@ class ChatClient:
         self.entry.delete(0, tk.END)
         if not text.strip():
             return
+        # Show own message immediately; server broadcasts to others
         self.append_text(f"You: {text}")
         self.send_json({"type": "chat", "message": text})
 
-    # ---------- UI helpers ----------
+    # ----------------------- UI helpers -----------------------
     def append_text(self, line: str):
         if not self.text_area:
             return
@@ -260,6 +303,7 @@ class ChatClient:
     def show_codes_window(self, codes):
         win = tk.Toplevel(self.root)
         win.title("Your recovery codes")
+        win.grab_set()
         tk.Label(win, text="Save these codes securely. Each code can be used once.").pack(pady=4)
         txt = scrolledtext.ScrolledText(win, width=60, height=15)
         txt.pack(padx=8, pady=8)
@@ -270,43 +314,40 @@ class ChatClient:
         txt.config(state="disabled")
         tk.Button(win, text="Close", command=win.destroy).pack(pady=4)
 
-    # ---------- Disconnect handling ----------
+    # ----------------------- Disconnect and shutdown -----------------------
     def on_disconnect(self):
         if not self.connected:
             return
         self.connected = False
-        try:
-            if self.sock:
-                self.sock.close()
-        except Exception:
-            pass
-        self.sock = None
+        self.stop_threads.set()
+        self.disconnect_socket()
         self.show_reconnect_dialog()
 
     def show_reconnect_dialog(self):
         dlg = tk.Toplevel(self.root)
         dlg.title("Connection lost")
-        dlg.grab_set()  # modal
+        dlg.grab_set()
         tk.Label(dlg, text="The connection to the server was lost.\nDo you want to reconnect?").pack(padx=12, pady=12)
         btns = tk.Frame(dlg); btns.pack(pady=8)
+
         def do_reconnect():
             dlg.destroy()
-            # back to connect view
             self.build_connect_view()
+
         def do_close():
             dlg.destroy()
             self.close_all()
+
         tk.Button(btns, text="Reconnect", command=do_reconnect, width=12).grid(row=0, column=0, padx=6)
         tk.Button(btns, text="Close", command=do_close, width=12).grid(row=0, column=1, padx=6)
 
     def close_all(self):
-        self.connected = False
+        self.stop_threads.set()
+        self.disconnect_socket()
         try:
-            if self.sock:
-                self.sock.close()
+            self.root.destroy()
         except Exception:
             pass
-        self.root.destroy()
 
 if __name__ == "__main__":
     ChatClient()
