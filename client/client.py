@@ -7,20 +7,17 @@ import time
 
 class ChatClient:
     def __init__(self):
-        # Connection state
         self.sock = None
         self.connected = False
         self.buffer = ""
         self.username = None
 
-        # Tk root and views
         self.root = tk.Tk()
         self.root.title("Chat Client")
         self.connect_frame = None
         self.auth_frame = None
         self.chat_frame = None
 
-        # Widgets
         self.host_entry = None
         self.port_entry = None
         self.username_entry = None
@@ -28,17 +25,14 @@ class ChatClient:
         self.text_area = None
         self.entry = None
 
-        # Threads control
         self.reader_thread = None
         self.ping_thread = None
         self.stop_threads = threading.Event()
 
-        # Build UI
         self.build_connect_view()
         self.root.protocol("WM_DELETE_WINDOW", self.close_all)
         self.root.mainloop()
 
-    # ----------------------- UI view helpers -----------------------
     def clear_root(self):
         for child in self.root.winfo_children():
             child.destroy()
@@ -97,7 +91,6 @@ class ChatClient:
         self.entry.bind("<Return>", self.send_message)
         tk.Button(bottom, text="Send", width=10, command=self.send_message).pack(side="right", padx=4)
 
-    # ----------------------- Networking -----------------------
     def connect_server(self):
         host = (self.host_entry.get() if self.host_entry else "").strip()
         port_str = (self.port_entry.get() if self.port_entry else "").strip()
@@ -107,7 +100,7 @@ class ChatClient:
             messagebox.showerror("Error", "Port must be a number.")
             return
 
-        self.disconnect_socket()  # ensure clean state
+        self.disconnect_socket()
         self.stop_threads.clear()
 
         try:
@@ -122,7 +115,6 @@ class ChatClient:
             messagebox.showerror("Error", f"Connection failed: {e}")
             return
 
-        # Switch to auth view and start threads
         self.build_auth_view()
         self.reader_thread = threading.Thread(target=self.read_loop, daemon=True)
         self.reader_thread.start()
@@ -136,7 +128,6 @@ class ChatClient:
             data = (json.dumps(obj) + "\n").encode("utf-8")
             self.sock.sendall(data)
         except Exception:
-            # Any send failure triggers disconnect flow
             self.root.after(0, self.on_disconnect)
 
     def read_loop(self):
@@ -150,17 +141,15 @@ class ChatClient:
                     line, self.buffer = self.buffer.split("\n", 1)
                     if not line.strip():
                         continue
-                    # Marshal handling to main thread
                     self.root.after(0, self.handle_server_message, line)
         except Exception:
             pass
-        # Exit path
         self.root.after(0, self.on_disconnect)
 
     def ping_loop(self):
         while self.connected and not self.stop_threads.is_set():
             self.send_json({"type": "ping"})
-            for _ in range(20):  # 2s sleep in 0.1s steps to allow responsive stop
+            for _ in range(20):
                 if not self.connected or self.stop_threads.is_set():
                     return
                 time.sleep(0.1)
@@ -178,7 +167,6 @@ class ChatClient:
         self.sock = None
         self.connected = False
 
-    # ----------------------- Server message handling -----------------------
     def handle_server_message(self, line: str):
         try:
             msg = json.loads(line)
@@ -195,7 +183,6 @@ class ChatClient:
             return
 
         if mtype == "login_ok":
-            # Move to chat on successful login
             self.username = (self.username_entry.get() if self.username_entry else "").strip()
             self.build_chat_view()
             self.append_text("[System] Login successful.")
@@ -215,7 +202,6 @@ class ChatClient:
             messagebox.showerror("Error", msg.get("message", "Unknown error"))
             return
 
-    # ----------------------- Actions -----------------------
     def login(self):
         u = (self.username_entry.get() if self.username_entry else "").strip()
         p = (self.password_entry.get() if self.password_entry else "")
@@ -287,11 +273,9 @@ class ChatClient:
         self.entry.delete(0, tk.END)
         if not text.strip():
             return
-        # Show own message immediately; server broadcasts to others
         self.append_text(f"You: {text}")
         self.send_json({"type": "chat", "message": text})
 
-    # ----------------------- UI helpers -----------------------
     def append_text(self, line: str):
         if not self.text_area:
             return
@@ -314,7 +298,6 @@ class ChatClient:
         txt.config(state="disabled")
         tk.Button(win, text="Close", command=win.destroy).pack(pady=4)
 
-    # ----------------------- Disconnect and shutdown -----------------------
     def on_disconnect(self):
         if not self.connected:
             return

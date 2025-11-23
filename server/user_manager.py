@@ -74,7 +74,7 @@ def reset_password_with_code(username: str, recovery_code: str, new_password: st
     if not new_password:
         return False, "New password is required."
     users[username]["password"] = _hash_password(new_password)
-    codes.remove(recovery_code)  # 恢复码一次性使用
+    codes.remove(recovery_code)  
     users[username]["recovery_codes"] = codes
     _write_json(USER_FILE, users)
     return True, "Password has been reset successfully."
