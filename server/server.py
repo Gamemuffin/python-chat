@@ -1,90 +1,133 @@
 import socket
 import threading
 import argparse
+import json
+from typing import Dict, Tuple
 from user_manager import register_user, login_user, reset_password_with_code, delete_user_with_code
 
-clients = {}
-authenticated = {}
+# conn -> {"username": str or None}
+clients_lock = threading.Lock()
+clients: Dict[socket.socket, Dict] = {}
 
-def handle_client(conn, addr):
+def send_json(conn: socket.socket, obj: dict) -> None:
+    try:
+        data = (json.dumps(obj) + "\n").encode("utf-8")
+        conn.sendall(data)
+    except Exception:
+        pass  # if send fails, read loop will handle disconnect
+
+def broadcast_chat(sender_conn: socket.socket, username: str, message: str) -> None:
+    with clients_lock:
+        for conn in list(clients.keys()):
+            if conn is sender_conn:
+                continue  # exclude sender; client shows its own "You:" message
+            try:
+                send_json(conn, {"type": "chat", "from": username, "message": message})
+            except Exception:
+                cleanup(conn)
+
+def cleanup(conn: socket.socket) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
+    with clients_lock:
+        if conn in clients:
+            del clients[conn]
+
+def parse_line(line: str) -> dict:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return {"type": "error", "message": "Invalid JSON"}
+
+def handle_command(conn: socket.socket, cmd: dict) -> None:
+    ctype = cmd.get("type")
+
+    if ctype == "ping":
+        send_json(conn, {"type": "pong"})
+        return
+
+    if ctype == "register":
+        ok, result = register_user(cmd.get("username", ""), cmd.get("password", ""))
+        if ok:
+            send_json(conn, {"type": "register_ok", "recovery_codes": result})
+        else:
+            send_json(conn, {"type": "error", "message": result})
+        return
+
+    if ctype == "login":
+        ok, result = login_user(cmd.get("username", ""), cmd.get("password", ""))
+        if ok:
+            with clients_lock:
+                clients[conn] = {"username": cmd.get("username", "").strip()}
+            send_json(conn, {"type": "login_ok", "message": result})
+        else:
+            send_json(conn, {"type": "error", "message": result})
+        return
+
+    if ctype == "reset_password":
+        ok, result = reset_password_with_code(
+            cmd.get("username", ""),
+            cmd.get("recovery_code", ""),
+            cmd.get("new_password", ""),
+        )
+        if ok:
+            send_json(conn, {"type": "reset_ok", "message": result})
+        else:
+            send_json(conn, {"type": "error", "message": result})
+        return
+
+    if ctype == "delete_account":
+        ok, result = delete_user_with_code(
+            cmd.get("username", ""),
+            cmd.get("recovery_code", ""),
+        )
+        if ok:
+            send_json(conn, {"type": "delete_ok", "message": result})
+        else:
+            send_json(conn, {"type": "error", "message": result})
+        return
+
+    if ctype == "chat":
+        with clients_lock:
+            username = clients.get(conn, {}).get("username")
+        if not username:
+            send_json(conn, {"type": "error", "message": "Please login first."})
+            return
+        msg = str(cmd.get("message", "")).strip()
+        if not msg:
+            return
+        broadcast_chat(conn, username, msg)
+        return
+
+    send_json(conn, {"type": "error", "message": "Unknown command"})
+
+def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
     print(f"[Connected] {addr}")
-    authenticated[conn] = False
+    with clients_lock:
+        clients[conn] = {"username": None}
+
+    buf = ""
     try:
         while True:
             data = conn.recv(4096)
             if not data:
                 break
-            msg = data.decode("utf-8", errors="ignore")
-
-            if msg == "PING":
-                conn.send(b"PONG")
-                continue
-
-            if msg.startswith("REGISTER "):
-                _, username, password = msg.split(" ", 2)
-                success, result = register_user(username.strip(), password)
-                if success:
-                    codes_text = "\n".join(result)
-                    response = f"Registration successful!\nYour recovery codes:\n{codes_text}"
-                    conn.send(response.encode("utf-8"))
-                else:
-                    conn.send(f"Register failed: {result}".encode("utf-8"))
-
-            elif msg.startswith("LOGIN "):
-                _, username, password = msg.split(" ", 2)
-                success, result = login_user(username.strip(), password)
-                if success:
-                    authenticated[conn] = True
-                    clients[conn] = username.strip()
-                    conn.send(result.encode("utf-8"))
-                else:
-                    conn.send(f"Login failed: {result}".encode("utf-8"))
-
-            elif msg.startswith("RESET "):
-                _, username, recovery_code, new_password = msg.split(" ", 3)
-                success, result = reset_password_with_code(username.strip(), recovery_code.strip(), new_password)
-                if success:
-                    conn.send(result.encode("utf-8"))
-                else:
-                    conn.send(f"Reset failed: {result}".encode("utf-8"))
-
-            elif msg.startswith("DELETE "):
-                _, username, recovery_code = msg.split(" ", 2)
-                success, result = delete_user_with_code(username.strip(), recovery_code.strip())
-                if success:
-                    conn.send(result.encode("utf-8"))
-                else:
-                    conn.send(f"Delete failed: {result}".encode("utf-8"))
-
-            else:
-                if authenticated.get(conn, False):
-                    username = clients.get(conn, "Unknown")
-                    broadcast(f"{username}: {msg}", conn)
-                else:
-                    conn.send(b"Please login or register first.")
+            buf += data.decode("utf-8", errors="ignore")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                if not line.strip():
+                    continue
+                cmd = parse_line(line)
+                handle_command(conn, cmd)
     except Exception as e:
-        print(f"[Error] {addr} -> {e}")
+        print(f"[Error] {addr}: {e}")
     finally:
-        cleanup_connection(conn)
+        cleanup(conn)
+        print(f"[Disconnected] {addr}")
 
-def broadcast(msg, sender):
-    for client in list(clients.keys()):
-        try:
-            client.send(msg.encode("utf-8"))
-        except:
-            cleanup_connection(client)
-
-def cleanup_connection(conn):
-    try:
-        conn.close()
-    except:
-        pass
-    if conn in clients:
-        del clients[conn]
-    if conn in authenticated:
-        del authenticated[conn]
-
-def start_server(host, port):
+def start_server(host: str, port: int) -> None:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
@@ -95,8 +138,8 @@ def start_server(host, port):
         threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Chat server")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind IP address")
-    parser.add_argument("--port", type=int, default=5000, help="Listening port")
+    parser = argparse.ArgumentParser(description="Chat Server (plaintext)")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind IP")
+    parser.add_argument("--port", type=int, default=5000, help="Port")
     args = parser.parse_args()
     start_server(args.host, args.port)
