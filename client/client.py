@@ -1,9 +1,11 @@
+# client.py
 import socket
 import threading
 import tkinter as tk
-from tkinter import messagebox, scrolledtext
+from tkinter import messagebox, scrolledtext, simpledialog
 import json
 import time
+import os
 
 class ChatClient:
     def __init__(self):
@@ -84,12 +86,25 @@ class ChatClient:
         self.text_area = tk.Text(top, state="disabled", width=80, height=24)
         self.text_area.pack(fill="both", expand=True)
 
+        # left control buttons: contacts / get my code / refresh contacts
+        ctrl = tk.Frame(self.chat_frame)
+        ctrl.pack(fill="x", pady=4)
+        tk.Button(ctrl, text="Contacts", width=12, command=self.open_contacts_window).pack(side="left", padx=4)
+        tk.Button(ctrl, text="Get my code", width=12, command=self.request_my_code).pack(side="left", padx=4)
+        tk.Button(ctrl, text="Refresh contacts", width=14, command=self.request_list_contacts).pack(side="left", padx=4)
+
         bottom = tk.Frame(self.chat_frame)
         bottom.pack(fill="x", pady=6)
         self.entry = tk.Entry(bottom)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", self.send_message)
         tk.Button(bottom, text="Send", width=10, command=self.send_message).pack(side="right", padx=4)
+
+        # ensure local chat history dir exists
+        os.makedirs("chat_history", exist_ok=True)
+        # load local history if exists
+        if self.username:
+            self.load_local_history()
 
     def connect_server(self):
         host = (self.host_entry.get() if self.host_entry else "").strip()
@@ -195,7 +210,38 @@ class ChatClient:
         if mtype == "chat":
             from_user = msg.get("from", "Unknown")
             text = msg.get("message", "")
-            self.append_text(f"{from_user}: {text}")
+            line = f"{from_user}: {text}"
+            self.append_text(line)
+            # save to local history (for current user)
+            self.save_local_history(line)
+            return
+
+        if mtype == "your_code":
+            code = msg.get("code")
+            ttl = msg.get("ttl", 60)
+            messagebox.showinfo("Your code", f"Your current 6-digit code: {code}\nValid for {ttl} seconds.")
+            return
+
+        if mtype == "add_contact_ok":
+            contact = msg.get("contact")
+            messagebox.showinfo("Contacts", f"Added contact: {contact}")
+            return
+
+        if mtype == "remove_contact_ok":
+            contact = msg.get("contact")
+            messagebox.showinfo("Contacts", f"Removed contact: {contact}")
+            return
+
+        if mtype == "list_contacts_ok":
+            contacts = msg.get("contacts", [])
+            # show contacts window if open
+            self.show_contacts_list(contacts)
+            return
+
+        if mtype == "online_status":
+            user = msg.get("user")
+            online = msg.get("online", False)
+            messagebox.showinfo("Online status", f"{user} is {'online' if online else 'offline'}.")
             return
 
         if mtype == "error":
@@ -274,6 +320,7 @@ class ChatClient:
         if not text.strip():
             return
         self.append_text(f"You: {text}")
+        self.save_local_history(f"You: {text}")
         self.send_json({"type": "chat", "message": text})
 
     def append_text(self, line: str):
@@ -288,7 +335,7 @@ class ChatClient:
         win = tk.Toplevel(self.root)
         win.title("Your recovery codes")
         win.grab_set()
-        tk.Label(win, text="Save these codes securely. Each code can be used once.").pack(pady=4)
+        tk.Label(win, text="Save these codes securely. Each code can be used (reusable).").pack(pady=4)
         txt = scrolledtext.ScrolledText(win, width=60, height=15)
         txt.pack(padx=8, pady=8)
         if isinstance(codes, list):
@@ -329,6 +376,101 @@ class ChatClient:
         self.disconnect_socket()
         try:
             self.root.destroy()
+        except Exception:
+            pass
+
+    # -------------------------
+    # Contacts UI & actions
+    # -------------------------
+    def open_contacts_window(self):
+        win = tk.Toplevel(self.root)
+        win.title("Contacts")
+        win.grab_set()
+        win.geometry("400x300")
+
+        listbox = tk.Listbox(win)
+        listbox.pack(fill="both", expand=True, padx=6, pady=6)
+
+        def refresh():
+            self.request_list_contacts()
+
+        def on_add():
+            code = simpledialog.askstring("Add contact", "Enter 6-digit contact code:", parent=win)
+            if not code:
+                return
+            self.send_json({"type": "add_contact", "code": code})
+
+        def on_remove():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showerror("Error", "Select a contact to remove.")
+                return
+            target = listbox.get(sel[0]).split(" ")[0]  # format "username (online)" maybe
+            self.send_json({"type": "remove_contact", "target": target})
+
+        def on_query():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showerror("Error", "Select a contact to query.")
+                return
+            target = listbox.get(sel[0]).split(" ")[0]
+            self.send_json({"type": "query_online", "user": target})
+
+        btns = tk.Frame(win)
+        btns.pack(fill="x", pady=4)
+        tk.Button(btns, text="Add by code", command=on_add).pack(side="left", padx=4)
+        tk.Button(btns, text="Remove contact", command=on_remove).pack(side="left", padx=4)
+        tk.Button(btns, text="Is online?", command=on_query).pack(side="left", padx=4)
+        tk.Button(btns, text="Refresh", command=refresh).pack(side="right", padx=4)
+
+        # store listbox for update
+        self._contacts_listbox = listbox
+        # trigger initial load
+        self.request_list_contacts()
+
+    def show_contacts_list(self, contacts):
+        # contacts: list of {"username": u, "online": True/False}
+        if hasattr(self, "_contacts_listbox") and self._contacts_listbox:
+            lb = self._contacts_listbox
+            lb.delete(0, "end")
+            for c in contacts:
+                uname = c.get("username")
+                online = c.get("online", False)
+                lb.insert("end", f"{uname} {'(online)' if online else '(offline)'}")
+
+    def request_my_code(self):
+        self.send_json({"type": "get_code"})
+
+    def request_list_contacts(self):
+        self.send_json({"type": "list_contacts"})
+
+    # -------------------------
+    # Local chat history
+    # -------------------------
+    def save_local_history(self, line: str):
+        if not self.username:
+            return
+        path = os.path.join("chat_history", f"{self.username}.txt")
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{int(time.time())} {line}\n")
+        except Exception:
+            pass
+
+    def load_local_history(self):
+        path = os.path.join("chat_history", f"{self.username}.txt")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    # skip leading timestamp
+                    parts = line.strip().split(" ", 1)
+                    if len(parts) == 2:
+                        _, content = parts
+                    else:
+                        content = line.strip()
+                    self.append_text(content)
         except Exception:
             pass
 
