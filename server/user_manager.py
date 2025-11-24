@@ -1,3 +1,4 @@
+
 import json, os, hashlib, random, string, uuid
 
 USER_FILE = "users.json"
@@ -15,14 +16,22 @@ def _json(path, data=None):
         return data
 
 def _hash(pw): return hashlib.sha256(pw.encode()).hexdigest()
-def _codes(n=10, length=16): return sorted({"".join(random.choices(CHARSET, k=length)) for _ in range(n)})
+
+def _codes(n=10, length=16): return sorted(
+    {"".join(random.choices(CHARSET, k=length)) for _ in range(n)}
+)
 
 def register_user(username, password):
     users = _json(USER_FILE)
     u = username.strip()
     if not u or not password: return False, "Username and password required."
     if u in users: return False, "User exists."
-    users[u] = {"uuid": str(uuid.uuid4()), "password": _hash(password), "contacts": {}, "recovery_codes": _codes()}
+    users[u] = {
+        "uuid": str(uuid.uuid4()),
+        "password": _hash(password),
+        "contacts": {},
+        "recovery_codes": _codes()
+    }
     _json(USER_FILE, users)
     return True, users[u]["recovery_codes"]
 

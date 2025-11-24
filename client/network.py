@@ -1,3 +1,4 @@
+
 import socket, threading, json, time
 from tkinter import messagebox
 
@@ -13,10 +14,12 @@ def connect_server(client):
         client.sock.connect((client.host_entry.get().strip(), port))
         client.sock.settimeout(None)
         client.connected = True
+        print(f"已连接到服务器：{client.host_entry.get().strip()}:{port}")  # 新增日志
         messagebox.showinfo("Info", "Connected to server")
     except Exception as e:
         client.connected = False
         client.sock = None
+        print(f"连接失败：{e}")  # 新增日志
         return messagebox.showerror("Error", f"Connection failed: {e}")
     client.build_auth_view()
     threading.Thread(target=read_loop, args=(client,), daemon=True).start()
@@ -60,3 +63,4 @@ def disconnect_socket(client):
     except: pass
     client.sock = None
     client.connected = False
+    print("已断开与服务器的连接")  # 新增日志
