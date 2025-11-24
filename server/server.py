@@ -1,313 +1,199 @@
-# server.py
-import socket
-import threading
-import argparse
-import json
-import os
-import time
-import random
+# server.py (optimized)
+import socket, threading, argparse, json, os, time, random
 from typing import Dict, Tuple
 from user_manager import (
     register_user, login_user, reset_password_with_code, delete_user_with_code,
-    add_contact, remove_contact, list_contacts, get_user_by_username, set_user_field
+    add_contact, remove_contact, list_contacts
 )
 
 clients_lock = threading.Lock()
-# map socket -> { "username": str or None }
 clients: Dict[socket.socket, Dict] = {}
 
-# ephemeral codes: username -> {"code": "123456", "expire": timestamp}
 ephemeral_lock = threading.Lock()
 ephemeral_codes: Dict[str, Dict] = {}
 
 LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
-def send_json(conn: socket.socket, obj: dict) -> None:
-    try:
-        data = (json.dumps(obj) + "\n").encode("utf-8")
-        conn.sendall(data)
-    except Exception:
-        pass
+# ---------------------
+# Helpers
+# ---------------------
+def send_json(conn, obj): 
+    try: conn.sendall((json.dumps(obj) + "\n").encode())
+    except: cleanup(conn)
 
-def broadcast_chat(sender_conn: socket.socket, username: str, message: str) -> None:
-    # save to server logs
-    timestamp = int(time.time())
-    log_line = f"{timestamp} {username}: {message}\n"
-    # global log
-    with open(os.path.join(LOG_DIR, "global.log"), "a", encoding="utf-8") as f:
-        f.write(log_line)
-    # write per-user logs (append to every existing user file so server keeps per-user history)
-    # this might duplicate but ensures everyone has a record on server
-    users = []
-    try:
-        for fn in os.listdir(LOG_DIR):
-            # skip global.log
-            pass
-    except Exception:
-        pass
+def get_username(conn): 
+    with clients_lock: return clients.get(conn, {}).get("username")
 
-    # broadcast to clients
+def write_log(username, msg):
+    ts = int(time.time())
+    line = f"{ts} {username}: {msg}\n"
+    open(os.path.join(LOG_DIR, "global.log"), "a", encoding="utf-8").write(line)
     with clients_lock:
-        for conn in list(clients.keys()):
-            try:
-                send_json(conn, {"type": "chat", "from": username, "message": message})
-            except Exception:
-                cleanup(conn)
-    # also update per-user logs for existing registered users
-    # fetch list of users from user_manager file by reading users.json indirectly via user_manager
-    # to avoid circular imports we will attempt to write to each user's log only if their file name is present
-    try:
-        # read users file content using get_user_by_username is heavy; to be simple just write user-specific logs for currently connected users
-        with clients_lock:
-            for c, info in clients.items():
-                uname = info.get("username")
-                if uname:
-                    with open(os.path.join(LOG_DIR, f"{uname}.log"), "a", encoding="utf-8") as f:
-                        f.write(log_line)
-    except Exception:
-        pass
+        for _, info in clients.items():
+            u = info.get("username")
+            if u: open(os.path.join(LOG_DIR, f"{u}.log"), "a", encoding="utf-8").write(line)
 
-def cleanup(conn: socket.socket) -> None:
-    try:
-        conn.close()
-    except Exception:
-        pass
+def broadcast_chat(sender, username, msg):
+    write_log(username, msg)
     with clients_lock:
-        if conn in clients:
-            del clients[conn]
+        for c in list(clients.keys()):
+            send_json(c, {"type": "chat", "from": username, "message": msg})
 
-def parse_line(line: str) -> dict:
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        return {"type": "error", "message": "Invalid JSON"}
+def cleanup(conn):
+    try: conn.close()
+    except: pass
+    with clients_lock: clients.pop(conn, None)
 
-def handle_command(conn: socket.socket, cmd: dict) -> None:
-    ctype = cmd.get("type")
+def parse_line(line): 
+    try: return json.loads(line)
+    except: return {"type": "error", "message": "Invalid JSON"}
 
-    if ctype == "ping":
-        send_json(conn, {"type": "pong"})
-        return
+# ---------------------
+# Command Handlers
+# ---------------------
+def cmd_register(conn, cmd):
+    ok, res = register_user(cmd.get("username",""), cmd.get("password",""))
+    send_json(conn, {"type": "register_ok", "recovery_codes": res} if ok else {"type":"error","message":res})
 
-    if ctype == "register":
-        ok, result = register_user(cmd.get("username", ""), cmd.get("password", ""))
-        if ok:
-            send_json(conn, {"type": "register_ok", "recovery_codes": result})
+def cmd_login(conn, cmd):
+    ok, res = login_user(cmd.get("username",""), cmd.get("password",""))
+    if ok:
+        with clients_lock: clients[conn] = {"username": cmd.get("username","").strip()}
+        send_json(conn, {"type":"login_ok","message":res})
+    else: send_json(conn, {"type":"error","message":res})
+
+def cmd_reset(conn, cmd):
+    ok, res = reset_password_with_code(cmd.get("username",""), cmd.get("recovery_code",""), cmd.get("new_password",""))
+    send_json(conn, {"type":"reset_ok","message":res} if ok else {"type":"error","message":res})
+
+def cmd_delete(conn, cmd):
+    ok, res = delete_user_with_code(cmd.get("username",""), cmd.get("recovery_code",""))
+    send_json(conn, {"type":"delete_ok","message":res} if ok else {"type":"error","message":res})
+
+def cmd_chat(conn, cmd):
+    u = get_username(conn)
+    if not u: return send_json(conn, {"type":"error","message":"Please login first."})
+    msg = str(cmd.get("message","")).strip()
+    if msg: broadcast_chat(conn, u, msg)
+
+def cmd_get_code(conn, cmd):
+    u = get_username(conn)
+    if not u: return send_json(conn, {"type":"error","message":"Please login first."})
+    with ephemeral_lock:
+        ent = ephemeral_codes.get(u)
+        if ent and ent["expire"] > time.time():
+            code, ttl = ent["code"], int(ent["expire"]-time.time())
         else:
-            send_json(conn, {"type": "error", "message": result})
-        return
+            code = f"{random.randint(0,999999):06d}"
+            ephemeral_codes[u] = {"code":code,"expire":time.time()+60}
+            ttl = 60
+    send_json(conn, {"type":"your_code","code":code,"ttl":ttl})
 
-    if ctype == "login":
-        ok, result = login_user(cmd.get("username", ""), cmd.get("password", ""))
-        if ok:
-            with clients_lock:
-                clients[conn] = {"username": cmd.get("username", "").strip()}
-            send_json(conn, {"type": "login_ok", "message": result})
-        else:
-            send_json(conn, {"type": "error", "message": result})
-        return
+def cmd_add_contact(conn, cmd):
+    u = get_username(conn)
+    code = str(cmd.get("code","")).strip()
+    if not u: return send_json(conn, {"type":"error","message":"Please login first."})
+    if not (code.isdigit() and len(code)==6): return send_json(conn, {"type":"error","message":"Invalid code format."})
+    target=None
+    with ephemeral_lock:
+        for name, ent in ephemeral_codes.items():
+            if ent["code"]==code and ent["expire"]>time.time(): target=name; break
+    if not target: return send_json(conn, {"type":"error","message":"Code invalid or expired."})
+    if target==u: return send_json(conn, {"type":"error","message":"Cannot add yourself."})
+    ok,msg = add_contact(u,target)
+    send_json(conn, {"type":"add_contact_ok","message":msg,"contact":target} if ok else {"type":"error","message":msg})
 
-    if ctype == "reset_password":
-        ok, result = reset_password_with_code(
-            cmd.get("username", ""),
-            cmd.get("recovery_code", ""),
-            cmd.get("new_password", ""),
-        )
-        if ok:
-            send_json(conn, {"type": "reset_ok", "message": result})
-        else:
-            send_json(conn, {"type": "error", "message": result})
-        return
+def cmd_remove_contact(conn, cmd):
+    u = get_username(conn)
+    if not u: return send_json(conn, {"type":"error","message":"Please login first."})
+    ok,msg = remove_contact(u, cmd.get("target","").strip())
+    send_json(conn, {"type":"remove_contact_ok","message":msg,"contact":cmd.get("target","")} if ok else {"type":"error","message":msg})
 
-    if ctype == "delete_account":
-        ok, result = delete_user_with_code(
-            cmd.get("username", ""),
-            cmd.get("recovery_code", ""),
-        )
-        if ok:
-            send_json(conn, {"type": "delete_ok", "message": result})
-        else:
-            send_json(conn, {"type": "error", "message": result})
-        return
+def cmd_list_contacts(conn, cmd):
+    u = get_username(conn)
+    if not u: return send_json(conn, {"type":"error","message":"Please login first."})
+    ok, contacts = list_contacts(u)
+    if not ok: return send_json(conn, {"type":"error","message":"Failed to list contacts."})
+    online = {info.get("username"):True for _,info in clients.items()}
+    send_json(conn, {"type":"list_contacts_ok","contacts":[{"username":c,"online":online.get(c,False)} for c in contacts]})
 
-    if ctype == "chat":
-        with clients_lock:
-            username = clients.get(conn, {}).get("username")
-        if not username:
-            send_json(conn, {"type": "error", "message": "Please login first."})
-            return
-        msg = str(cmd.get("message", "")).strip()
-        if msg:
-            broadcast_chat(conn, username, msg)
-        return
+def cmd_query_online(conn, cmd):
+    target = cmd.get("user","").strip()
+    online = any(info.get("username")==target for _,info in clients.items())
+    send_json(conn, {"type":"online_status","user":target,"online":online})
 
-    # --- new contact / ephemeral code APIs ---
-    if ctype == "get_code":
-        # return current ephemeral code for the logged-in user
-        with clients_lock:
-            username = clients.get(conn, {}).get("username")
-        if not username:
-            send_json(conn, {"type": "error", "message": "Please login first."})
-            return
-        with ephemeral_lock:
-            ent = ephemeral_codes.get(username)
-            if ent and ent.get("expire", 0) > time.time():
-                code = ent["code"]
-                ttl = int(ent["expire"] - time.time())
-            else:
-                # generate a fresh code immediately
-                code = f"{random.randint(0,999999):06d}"
-                expire = time.time() + 60
-                ephemeral_codes[username] = {"code": code, "expire": expire}
-                ttl = 60
-        send_json(conn, {"type": "your_code", "code": code, "ttl": ttl})
-        return
+# ---------------------
+# Dispatcher
+# ---------------------
+COMMANDS = {
+    "register": cmd_register,
+    "login": cmd_login,
+    "reset_password": cmd_reset,
+    "delete_account": cmd_delete,
+    "chat": cmd_chat,
+    "get_code": cmd_get_code,
+    "add_contact": cmd_add_contact,
+    "remove_contact": cmd_remove_contact,
+    "list_contacts": cmd_list_contacts,
+    "query_online": cmd_query_online,
+    "ping": lambda c,_: send_json(c, {"type":"pong"})
+}
 
-    if ctype == "add_contact":
-        # payload: code (6-digit)
-        code = str(cmd.get("code", "")).strip()
-        with clients_lock:
-            username = clients.get(conn, {}).get("username")
-        if not username:
-            send_json(conn, {"type": "error", "message": "Please login first."})
-            return
-        if not code or len(code) != 6 or not code.isdigit():
-            send_json(conn, {"type": "error", "message": "Invalid code format."})
-            return
-        # find which username currently has that ephemeral code
-        target = None
-        with ephemeral_lock:
-            for u, ent in ephemeral_codes.items():
-                if ent.get("code") == code and ent.get("expire", 0) > time.time():
-                    target = u
-                    break
-        if not target:
-            send_json(conn, {"type": "error", "message": "Code invalid or expired."})
-            return
-        if target == username:
-            send_json(conn, {"type": "error", "message": "Cannot add yourself."})
-            return
-        ok, msg = add_contact(username, target)
-        if ok:
-            send_json(conn, {"type": "add_contact_ok", "message": msg, "contact": target})
-        else:
-            send_json(conn, {"type": "error", "message": msg})
-        return
+def handle_command(conn, cmd):
+    handler = COMMANDS.get(cmd.get("type"))
+    if handler: handler(conn, cmd)
+    else: send_json(conn, {"type":"error","message":"Unknown command"})
 
-    if ctype == "remove_contact":
-        target = str(cmd.get("target", "")).strip()
-        with clients_lock:
-            username = clients.get(conn, {}).get("username")
-        if not username:
-            send_json(conn, {"type": "error", "message": "Please login first."})
-            return
-        ok, msg = remove_contact(username, target)
-        if ok:
-            send_json(conn, {"type": "remove_contact_ok", "message": msg, "contact": target})
-        else:
-            send_json(conn, {"type": "error", "message": msg})
-        return
-
-    if ctype == "list_contacts":
-        with clients_lock:
-            username = clients.get(conn, {}).get("username")
-        if not username:
-            send_json(conn, {"type": "error", "message": "Please login first."})
-            return
-        ok, contacts = list_contacts(username)
-        if not ok:
-            send_json(conn, {"type": "error", "message": "Failed to list contacts."})
-            return
-        # also include online status for each contact
-        online_map = {}
-        with clients_lock:
-            for c, info in clients.items():
-                uname = info.get("username")
-                if uname:
-                    online_map[uname] = True
-        contacts_with_status = [{"username": u, "online": bool(online_map.get(u, False))} for u in contacts]
-        send_json(conn, {"type": "list_contacts_ok", "contacts": contacts_with_status})
-        return
-
-    if ctype == "query_online":
-        target = str(cmd.get("user", "")).strip()
-        with clients_lock:
-            # find whether any connected client has that username
-            online = False
-            for c, info in clients.items():
-                if info.get("username") == target:
-                    online = True
-                    break
-        send_json(conn, {"type": "online_status", "user": target, "online": online})
-        return
-
-    # unknown
-    send_json(conn, {"type": "error", "message": "Unknown command"})
-
-def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
+# ---------------------
+# Client loop
+# ---------------------
+def handle_client(conn, addr):
     print(f"[Connected] {addr}")
-    with clients_lock:
-        clients[conn] = {"username": None}
-
-    buf = ""
+    with clients_lock: clients[conn]={"username":None}
+    buf=""
     try:
         while True:
-            data = conn.recv(4096)
-            if not data:
-                break
-            buf += data.decode("utf-8", errors="ignore")
+            data=conn.recv(4096)
+            if not data: break
+            buf+=data.decode(errors="ignore")
             while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                if not line.strip():
-                    continue
-                cmd = parse_line(line)
-                handle_command(conn, cmd)
-    except Exception as e:
-        print(f"[Error] {addr}: {e}")
-    finally:
-        cleanup(conn)
-        print(f"[Disconnected] {addr}")
+                line,buf=buf.split("\n",1)
+                if line.strip(): handle_command(conn, parse_line(line))
+    except Exception as e: print(f"[Error] {addr}: {e}")
+    finally: cleanup(conn); print(f"[Disconnected] {addr}")
 
-def start_ephemeral_code_updater(interval: int = 60):
-    """Background thread that sets a new 6-digit code for every registered user each interval."""
+# ---------------------
+# Ephemeral updater
+# ---------------------
+def start_ephemeral_code_updater(interval=60):
     def worker():
         while True:
-            # read users from user_manager via get_user_by_username? There's no direct list function,
-            # so we'll attempt to read users.json directly to get usernames.
             try:
                 if os.path.exists("users.json"):
-                    with open("users.json", "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    now = time.time()
+                    data=json.load(open("users.json",encoding="utf-8"))
+                    now=time.time()
                     with ephemeral_lock:
-                        for uname in data.keys():
-                            code = f"{random.randint(0,999999):06d}"
-                            ephemeral_codes[uname] = {"code": code, "expire": now + interval}
-                else:
-                    # no users yet
-                    pass
-            except Exception as e:
-                print("[ephemeral updater] error:", e)
+                        for u in data.keys():
+                            ephemeral_codes[u]={"code":f"{random.randint(0,999999):06d}","expire":now+interval}
+            except Exception as e: print("[ephemeral updater] error:",e)
             time.sleep(interval)
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
+    threading.Thread(target=worker,daemon=True).start()
 
-def start_server(host: str, port: int) -> None:
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((host, port))
-    server.listen()
+# ---------------------
+# Server start
+# ---------------------
+def start_server(host, port):
+    srv=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+    srv.bind((host,port)); srv.listen()
     print(f"[Started] Chat server listening on {host}:{port}")
-    start_ephemeral_code_updater(60)
+    start_ephemeral_code_updater()
     while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        conn,addr=srv.accept()
+        threading.Thread(target=handle_client,args=(conn,addr),daemon=True).start()
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Chat Server (plaintext) with contacts and ephemeral codes")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind IP")
-    parser.add_argument("--port", type=int, default=5000, help="Port")
-    args = parser.parse_args()
-    start_server(args.host, args.port)
+if __name__=="__main__":
+    p=argparse.ArgumentParser(description="Chat Server (optimized)")
+    p.add_argument("--host",default="0.0.0.0"); p.add_argument("--port",type=int,default=5000)
+    args=p.parse_args(); start_server(args.host,args.port)
