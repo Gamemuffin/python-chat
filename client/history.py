@@ -1,4 +1,3 @@
-# history.py
 import os
 
 def load_local_history(client):
@@ -8,10 +7,9 @@ def load_local_history(client):
             for line in f:
                 client.append_text(line.strip())
 
-def save_local_history(client, line: str):
+def save_local_history(client, line):
     if client.username:
         os.makedirs("chat_history", exist_ok=True)
         path = f"chat_history/{client.username}.txt"
         with open(path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
-        

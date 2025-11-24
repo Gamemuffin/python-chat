@@ -1,4 +1,3 @@
-# network.py
 import socket, threading, json, time
 from tkinter import messagebox
 
@@ -7,26 +6,23 @@ def connect_server(client):
         port = int(client.port_entry.get().strip())
     except:
         return messagebox.showerror("Error", "Port must be a number.")
-
     disconnect_socket(client)
     client.stop_threads.clear()
-
     try:
         client.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client.sock.connect((client.host_entry.get().strip(), port))
         client.sock.settimeout(None)
         client.connected = True
-        messagebox.showinfo("Info", f"Connected to server")
+        messagebox.showinfo("Info", "Connected to server")
     except Exception as e:
         client.connected = False
         client.sock = None
         return messagebox.showerror("Error", f"Connection failed: {e}")
-
     client.build_auth_view()
     threading.Thread(target=read_loop, args=(client,), daemon=True).start()
     threading.Thread(target=ping_loop, args=(client,), daemon=True).start()
 
-def send_json(client, obj: dict):
+def send_json(client, obj):
     if not client.connected or not client.sock: return
     try:
         data = (json.dumps(obj) + "\n").encode("utf-8")

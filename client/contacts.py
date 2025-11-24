@@ -1,4 +1,3 @@
-# contacts.py
 import tkinter as tk
 from tkinter import simpledialog
 from network import send_json
@@ -8,7 +7,6 @@ def open_contacts_window(client):
     win.title("Contacts")
     win.geometry("400x300")
     win.grab_set()
-
     listbox = tk.Listbox(win)
     listbox.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -32,10 +30,8 @@ def show_contacts_list(client, contacts):
     win.title("Contacts List")
     win.geometry("300x300")
     win.grab_set()
-
     listbox = tk.Listbox(win)
     listbox.pack(fill="both", expand=True, padx=6, pady=6)
-
     for c in contacts:
         listbox.insert("end", f"{c['username']} ({'online' if c['online'] else 'offline'})")
 

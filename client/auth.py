@@ -1,4 +1,3 @@
-# auth.py
 import tkinter as tk
 from tkinter import messagebox
 from network import send_json
@@ -30,13 +29,15 @@ def delete_account(client):
 
 def _popup_form(client, title, fields, callback):
     win = tk.Toplevel(client.root)
-    win.title(title); win.grab_set()
+    win.title(title)
+    win.grab_set()
     entries = [make_entry(win, label, show) for label, show in fields]
 
     def do():
         vals = [e.get().strip() for e in entries]
         if any(not v for v in vals):
             return messagebox.showerror("Error", "All fields required.")
-        callback(*vals); win.destroy()
+        callback(*vals)
+        win.destroy()
 
     tk.Button(win, text="Confirm", command=do).pack()

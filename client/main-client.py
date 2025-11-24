@@ -66,6 +66,7 @@ class ChatClient:
             "reset_ok": lambda m: messagebox.showinfo("Info", m.get("message", "OK")),
             "delete_ok": lambda m: messagebox.showinfo("Info", m.get("message", "OK")),
             "chat": lambda m: self._handle_chat(m),
+            "private_chat": lambda m: self._handle_private_chat(m),
             "your_code": lambda m: messagebox.showinfo("Your code", f"{m.get('code')} valid {m.get('ttl',60)}s"),
             "add_contact_ok": lambda m: messagebox.showinfo("Contacts", m.get("message")),
             "remove_contact_ok": lambda m: messagebox.showinfo("Contacts", m.get("message")),
@@ -81,6 +82,14 @@ class ChatClient:
         append_text(self.text_area, line)
         save_local_history(self, line)
 
+    def _handle_private_chat(self, m):
+        if "from" in m:
+            line = f"[Private] {m['from']} -> you: {m['message']}"
+        else:
+            line = f"[Private] you -> {m['to']}: {m['message']}"
+        append_text(self.text_area, line)
+        save_local_history(self, line)
+
     def send_message(self, event=None):
         text = self.entry.get().strip(); self.entry.delete(0, tk.END)
         if text: send_json(self, {"type": "chat", "message": text})
@@ -92,7 +101,6 @@ class ChatClient:
 
     def close_all(self):
         self.stop_threads.set(); disconnect_socket(self); self.root.destroy()
-
 
 if __name__ == "__main__":
     ChatClient()
