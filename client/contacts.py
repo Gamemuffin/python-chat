@@ -11,9 +11,9 @@ def open_contacts_window(client):
     listbox.pack(fill="both", expand=True, padx=6, pady=6)
 
     def add_contact():
-        code = simpledialog.askstring("Add contact", "Enter 6-digit code:", parent=win)
-        if code:
-            send_json(client, {"type": "add_contact", "code": code})
+        username = simpledialog.askstring("Add contact", "Enter username:", parent=win)
+        if username:
+            send_json(client, {"type": "add_contact", "target": username})
 
     def remove_contact():
         sel = listbox.curselection()
