@@ -1,4 +1,4 @@
-import socket, threading, argparse, json, os, time
+import socket, threading, argparse, json, os, time, random, string
 from user_manager import register_user, login_user, reset_password_with_code, delete_user_with_code, add_contact, remove_contact, list_contacts
 
 clients_lock = threading.Lock()
@@ -93,6 +93,13 @@ def cmd_list_contacts(conn, cmd):
     online = {info.get("username"):True for _,info in clients.items()}
     send_json(conn, {"type":"list_contacts_ok","contacts":[{"username":c,"online":online.get(c,False)} for c in contacts]})
 
+def cmd_get_code(conn, cmd):
+    u = get_username(conn)
+    if not u: return send_json(conn, {"type":"error","message":"Please login first."})
+    code = "".join(random.choices(string.digits, k=6))
+    ttl = 60
+    send_json(conn, {"type":"your_code","code":code,"ttl":ttl})
+
 COMMANDS = {
     "register": cmd_register,
     "login": cmd_login,
@@ -103,6 +110,7 @@ COMMANDS = {
     "add_contact": cmd_add_contact,
     "remove_contact": cmd_remove_contact,
     "list_contacts": cmd_list_contacts,
+    "get_code": cmd_get_code,
     "ping": lambda c,_: send_json(c, {"type":"pong"})
 }
 
